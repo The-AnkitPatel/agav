@@ -77,6 +77,16 @@ const STDIN_RESUME_GAP_MS = 5000;
 // are indistinguishable from user input in isolation are almost certainly tails
 // of split SGR mouse reports. This window defines how long after the last mouse
 // consumption we should suppress those fragments.
+//
+// The window is refreshed on *every* mouse-shaped consumption — full reports,
+// orphaned CSI tails, and bare terminator fragments alike — so a flood stays
+// "in burst" as long as reports keep draining. That matters during a UI hang:
+// the event loop can be blocked while the terminal floods scroll reports, and
+// when it unblocks the piled-up reads drain back to back. Refreshing on every
+// drop re-arms the window at each drained fragment, so a rapid drain never
+// lapses mid-flood and the collapsed tails (`11MMMMMM`) are suppressed — while
+// a lone report followed by real silence still lets deliberately typed text
+// (`26M`) through once the window elapses.
 const MOUSE_BURST_WINDOW_MS = 150;
 
 const noop = (): void => {};
@@ -1525,13 +1535,20 @@ const ORPHANED_X10_MOUSE_RE =
 	/^\[M[\s\S]{3}/;
 
 /**
- * Matches a bare `digit(s)M` or `digit(s)m` fragment — the final numeric field
- * plus terminator of a split SGR mouse report. Without any semicolons these are
- * indistinguishable from user-typed text like "26M" or "100M", so this pattern
- * is ONLY checked during a mouse burst (when we recently consumed another mouse
- * sequence) to avoid false positives during normal typing.
+ * Matches a bare `digit(s)M`/`m` fragment OR a lone `M`/`m` terminator — the
+ * final numeric field (or nothing) plus terminator of a split SGR mouse report
+ * whose earlier fields were consumed at a prior read boundary. Without any
+ * semicolons these are indistinguishable from user-typed text like "26M" or a
+ * literal "M", so this pattern is ONLY checked during a mouse burst (when we
+ * recently consumed another mouse sequence) to avoid false positives during
+ * normal typing.
+ *
+ * The zero-digit case (a lone `M`/`m`) is the `11MMMMMM` tail: under a scroll
+ * flood, reports collapse so hard that a whole read is just the terminator.
+ * It is only ever dropped inside the burst window, so a user typing a bare
+ * "M" outside a flood is untouched.
  */
-const BARE_MOUSE_TAIL_RE = /^\d{1,4}[Mm]/;
+const BARE_MOUSE_TAIL_RE = /^\d{0,4}[Mm]/;
 
 const matchOrphanedCSI = (chunk: string, inMouseBurst = false): number => {
 	// Full orphaned SGR CSI: `[<button;col;rowM`
@@ -1562,7 +1579,11 @@ const matchOrphanedCSI = (chunk: string, inMouseBurst = false): number => {
 	// almost certainly residue from the same flood. This handles the common
 	// app-switch scenario where the terminal emits rapid mouse reports and
 	// read boundaries split sequences at arbitrary points.
-	if (inMouseBurst && ch !== undefined && ch >= "0" && ch <= "9") {
+	if (
+		inMouseBurst &&
+		ch !== undefined &&
+		((ch >= "0" && ch <= "9") || ch === "M" || ch === "m")
+	) {
 		const m = BARE_MOUSE_TAIL_RE.exec(chunk);
 		if (m) return m[0].length;
 	}
