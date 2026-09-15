@@ -180,4 +180,68 @@ describe("ink layer drops split SGR wheel reports (11MMMMMM gibberish)", () => {
 		expect(captured.join("")).toBe("man");
 		instance.unmount();
 	});
+
+	it("keeps M-initial typing in the SAME read as a mouse report", async () => {
+		captured.length = 0;
+		const {stdin, instance} = mount();
+		await instance.waitUntilRenderFlush();
+
+		// The same-chunk false positive: a mouse report and a typed command
+		// batched into one read. The lone-terminator lookahead requires the
+		// next byte to be more mouse residue, so `m` followed by `a` is NOT
+		// dropped — `man` keeps its leading letter.
+		stdin.emit("data", sgr(11, 5) + "man");
+		await instance.waitUntilRenderFlush();
+
+		expect(captured.join("")).toBe("man");
+		instance.unmount();
+	});
+
+	it("keeps mkdir/More in the same read as a mouse report", async () => {
+		captured.length = 0;
+		const {stdin, instance} = mount();
+		await instance.waitUntilRenderFlush();
+
+		stdin.emit("data", sgr(11, 5) + "mkdir foo");
+		await instance.waitUntilRenderFlush();
+		expect(captured.join("")).toBe("mkdir foo");
+
+		captured.length = 0;
+		stdin.emit("data", sgr(11, 5) + "More");
+		await instance.waitUntilRenderFlush();
+		expect(captured.join("")).toBe("More");
+
+		instance.unmount();
+	});
+
+	it("still drops flood residue that is followed by more residue in one read", async () => {
+		captured.length = 0;
+		const {stdin, instance} = mount();
+		await instance.waitUntilRenderFlush();
+
+		// Lone terminators followed by more mouse residue (another M, a `<`
+		// report, a digit tail) — all dropped; nothing leaks.
+		stdin.emit("data", sgr(11, 5) + "MM" + "<64;11;6M" + "11M" + "M");
+		await instance.waitUntilRenderFlush();
+
+		expect(captured.join("")).toBe("");
+		instance.unmount();
+	});
+
+	it("keeps a lone M typed at the very end of a report's read", async () => {
+		captured.length = 0;
+		const {stdin, instance} = mount();
+		await instance.waitUntilRenderFlush();
+
+		// Ambiguity note: a lone `M` at end-of-chunk right after a report IS
+		// treated as residue (the last terminator of a flood). A user typing a
+		// bare `M` in the exact same read as a mouse report is indistinguishable
+		// and vanishingly rare — the documented trade-off. Typing a bare `M`
+		// arrives as its own separate read (covered above) and is preserved.
+		stdin.emit("data", sgr(11, 5) + "M");
+		await instance.waitUntilRenderFlush();
+
+		expect(captured.join("")).toBe("");
+		instance.unmount();
+	});
 });

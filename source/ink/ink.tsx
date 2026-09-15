@@ -1580,13 +1580,25 @@ const BARE_MOUSE_TAIL_RE = /^\d{1,4}[Mm]/;
  * the `11MMMMMM` collapse under a scroll flood.
  *
  * A lone `M`/`m` is byte-identical to the first letter a user types in `man`,
- * `mkdir`, `More`, or a literal `M`, so it is dropped ONLY when a mouse fragment
- * was already consumed earlier in the same buffered read (`allowLoneTerminator`)
- * — the back-to-back shape of a flood. Typing that starts with `M`/`m` arrives
- * as a later, separate read, so it never satisfies the gate and keeps its
- * leading character.
+ * `mkdir`, `More`, or a literal `M`. Two guards keep those intact:
+ *
+ *   1. It is only matched when a mouse fragment was already consumed earlier in
+ *      the same buffered read (`allowLoneTerminator`) — the back-to-back shape
+ *      of a flood.
+ *   2. Even then, it is only residue when it is at the END of the chunk or is
+ *      immediately followed by another mouse-residue byte — another `M`/`m`, or
+ *      the `<`/`;`/digit/`\x1b` that begins the next collapsed report. A lone
+ *      `M`/`m` followed by any other character (a letter, space, punctuation)
+ *      is the start of a typed word and is left untouched, so `man`/`mkdir`
+ *      keep their leading letter even when they land in the same read as a
+ *      mouse report.
+ *
+ * The lookahead is a positive whitelist (mouse-continuation bytes) rather than
+ * a negative one, so it can never accidentally admit a stray typed character:
+ * anything not explicitly a mouse byte ends the run.
  */
-const LONE_MOUSE_TERMINATOR_RE = /^[Mm]/;
+// eslint-disable-next-line no-control-regex
+const LONE_MOUSE_TERMINATOR_RE = /^[Mm](?=$|[Mm<;0-9\x1b])/;
 
 const matchOrphanedCSI = (
 	chunk: string,
@@ -1627,9 +1639,10 @@ const matchOrphanedCSI = (
 	}
 
 	// Lone `M`/`m` terminator — a report body fully consumed at a prior read
-	// boundary (`11MMMMMM`). Gated more strictly than the numeric case: only
-	// while a flood is actively draining, so `M`-initial typing after a scroll
-	// (`man`, `mkdir`, a literal `M`) keeps its leading character.
+	// boundary (`11MMMMMM`). Gated more strictly than the numeric case: the
+	// same-read residue flag AND a lookahead that requires the next byte to be
+	// more mouse residue (or end-of-chunk). A lone `M`/`m` followed by a typed
+	// character (`man`, `mkdir`) fails the lookahead and is kept.
 	if (allowLoneTerminator && (ch === "M" || ch === "m")) {
 		const m = LONE_MOUSE_TERMINATOR_RE.exec(chunk);
 		if (m) return m[0].length;
