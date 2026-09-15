@@ -87,6 +87,12 @@ const STDIN_RESUME_GAP_MS = 5000;
 // lapses mid-flood and the collapsed tails (`11MMMMMM`) are suppressed — while
 // a lone report followed by real silence still lets deliberately typed text
 // (`26M`) through once the window elapses.
+//
+// The window alone is not enough to safely drop a *lone* `M`/`m` terminator,
+// which collides with the first letter of `man`/`mkdir`/`More`. That case adds
+// a stricter condition — a mouse fragment consumed earlier in the SAME buffered
+// read (`mouseResidueInChunk`) — so a keystroke that arrives as a later,
+// separate read keeps its leading letter even inside the window.
 const MOUSE_BURST_WINDOW_MS = 150;
 
 const noop = (): void => {};
@@ -792,6 +798,15 @@ export default class Ink {
 			}
 		};
 
+		// True once a mouse fragment has been consumed earlier in THIS chunk and
+		// no real input byte has followed it. A hung scroll flood is delivered
+		// as one buffered read with reports and their collapsed tails adjacent,
+		// so a lone `M`/`m` terminator is only residue while this holds. Human
+		// typing that starts with `M`/`m` (`man`, `mkdir`) always arrives as a
+		// later, separate read, so it never sees this set — its leading letter
+		// is preserved.
+		let mouseResidueInChunk = false;
+
 		while (chunk.length > 0) {
 			if (chunk.startsWith(PASTE_START)) {
 				flushInput();
@@ -816,6 +831,7 @@ export default class Ink {
 			if (match) {
 				flushInput();
 				this.lastMouseConsumedAt = now;
+				mouseResidueInChunk = true;
 				const parsed = parseMouseEvent(match.sequence);
 				if (parsed) {
 					this.handleMouseEvent(parsed);
@@ -865,14 +881,24 @@ export default class Ink {
 			// leading ESC was already consumed (split across reads, or
 			// stripped upstream). Drop it silently — it is never real input.
 			const inMouseBurst = (now - this.lastMouseConsumedAt) < MOUSE_BURST_WINDOW_MS;
-			const orphanedLen = matchOrphanedCSI(chunk, inMouseBurst);
+			// A lone `M`/`m` terminator is only residue when a mouse fragment was
+			// already consumed earlier in THIS chunk — the back-to-back shape of
+			// a buffered flood. It is NOT enough to be within the wall-clock
+			// window: `man`/`mkdir`/`M` typed after a scroll arrives as a later,
+			// separate read where `mouseResidueInChunk` is false, so its leading
+			// letter is preserved.
+			const orphanedLen = matchOrphanedCSI(chunk, inMouseBurst, mouseResidueInChunk);
 			if (orphanedLen > 0) {
 				flushInput();
 				this.lastMouseConsumedAt = now;
+				mouseResidueInChunk = true;
 				chunk = chunk.slice(orphanedLen);
 				continue;
 			}
 
+			// A real input byte ends the same-chunk residue run: anything that
+			// follows in this chunk is deliberate typing, not flood residue.
+			mouseResidueInChunk = false;
 			pendingInput += chunk[0];
 			chunk = chunk.slice(1);
 		}
@@ -1535,22 +1561,38 @@ const ORPHANED_X10_MOUSE_RE =
 	/^\[M[\s\S]{3}/;
 
 /**
- * Matches a bare `digit(s)M`/`m` fragment OR a lone `M`/`m` terminator — the
- * final numeric field (or nothing) plus terminator of a split SGR mouse report
- * whose earlier fields were consumed at a prior read boundary. Without any
- * semicolons these are indistinguishable from user-typed text like "26M" or a
- * literal "M", so this pattern is ONLY checked during a mouse burst (when we
- * recently consumed another mouse sequence) to avoid false positives during
- * normal typing.
+ * Matches a bare `digit(s)M`/`m` fragment — the final numeric field plus
+ * terminator of a split SGR mouse report whose earlier fields were consumed at
+ * a prior read boundary. Without any semicolons these are indistinguishable
+ * from user-typed text like "26M" or "100M", so this pattern is ONLY checked
+ * during a mouse burst (when we recently consumed another mouse sequence) to
+ * avoid false positives during normal typing.
  *
- * The zero-digit case (a lone `M`/`m`) is the `11MMMMMM` tail: under a scroll
- * flood, reports collapse so hard that a whole read is just the terminator.
- * It is only ever dropped inside the burst window, so a user typing a bare
- * "M" outside a flood is untouched.
+ * At least one digit is required. A bare `M`/`m` with no digits is handled
+ * separately (see LONE_MOUSE_TERMINATOR_RE), under a stricter gate, because it
+ * collides with the first letter of ordinary commands (`man`, `mkdir`, `More`).
  */
-const BARE_MOUSE_TAIL_RE = /^\d{0,4}[Mm]/;
+const BARE_MOUSE_TAIL_RE = /^\d{1,4}[Mm]/;
 
-const matchOrphanedCSI = (chunk: string, inMouseBurst = false): number => {
+/**
+ * Matches a lone `M`/`m` terminator — the last byte of a split SGR mouse report
+ * whose entire body was consumed at a prior read boundary. This is the tail of
+ * the `11MMMMMM` collapse under a scroll flood.
+ *
+ * A lone `M`/`m` is byte-identical to the first letter a user types in `man`,
+ * `mkdir`, `More`, or a literal `M`, so it is dropped ONLY when a mouse fragment
+ * was already consumed earlier in the same buffered read (`allowLoneTerminator`)
+ * — the back-to-back shape of a flood. Typing that starts with `M`/`m` arrives
+ * as a later, separate read, so it never satisfies the gate and keeps its
+ * leading character.
+ */
+const LONE_MOUSE_TERMINATOR_RE = /^[Mm]/;
+
+const matchOrphanedCSI = (
+	chunk: string,
+	inMouseBurst = false,
+	allowLoneTerminator = false,
+): number => {
 	// Full orphaned SGR CSI: `[<button;col;rowM`
 	if (chunk.length >= 6 && chunk[0] === "[" && chunk[1] === "<") {
 		const m = ORPHANED_SGR_MOUSE_RE.exec(chunk);
@@ -1579,12 +1621,17 @@ const matchOrphanedCSI = (chunk: string, inMouseBurst = false): number => {
 	// almost certainly residue from the same flood. This handles the common
 	// app-switch scenario where the terminal emits rapid mouse reports and
 	// read boundaries split sequences at arbitrary points.
-	if (
-		inMouseBurst &&
-		ch !== undefined &&
-		((ch >= "0" && ch <= "9") || ch === "M" || ch === "m")
-	) {
+	if (inMouseBurst && ch !== undefined && ch >= "0" && ch <= "9") {
 		const m = BARE_MOUSE_TAIL_RE.exec(chunk);
+		if (m) return m[0].length;
+	}
+
+	// Lone `M`/`m` terminator — a report body fully consumed at a prior read
+	// boundary (`11MMMMMM`). Gated more strictly than the numeric case: only
+	// while a flood is actively draining, so `M`-initial typing after a scroll
+	// (`man`, `mkdir`, a literal `M`) keeps its leading character.
+	if (allowLoneTerminator && (ch === "M" || ch === "m")) {
+		const m = LONE_MOUSE_TERMINATOR_RE.exec(chunk);
 		if (m) return m[0].length;
 	}
 

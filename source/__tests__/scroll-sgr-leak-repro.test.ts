@@ -106,39 +106,78 @@ describe("ink layer drops split SGR wheel reports (11MMMMMM gibberish)", () => {
 		await instance.waitUntilRenderFlush();
 
 		// The hang symptom: the event loop was blocked while the terminal
-		// flooded scroll reports, so wall-clock time passed but no reads were
-		// processed. When the loop unblocks, the piled-up reads drain back to
-		// back — a full report, then a stream of collapsed tails and lone
-		// terminators. That is the exact `11MMMMMM` the user sees.
-		stdin.emit("data", sgr(11, 5)); // full report -> starts the flood
-		stdin.emit("data", "11M");
-		stdin.emit("data", "M");
-		stdin.emit("data", "M");
-		stdin.emit("data", "M");
-		stdin.emit("data", "M");
+		// flooded scroll reports, so the OS buffered them and delivered the pile
+		// as ONE read when the loop unblocked — a full report followed by a run
+		// of collapsed tails and lone terminators, all adjacent in one chunk.
+		// That is the exact `11MMMMMM` the user sees.
+		stdin.emit("data", sgr(11, 5) + "11M" + "MMMM");
 		await instance.waitUntilRenderFlush();
 
 		expect(captured.join("")).toBe("");
 		instance.unmount();
 	});
 
-	it("drops lone M/m terminators while a flood is in flight", async () => {
+	it("drops lone M/m terminators adjacent to a report in one read", async () => {
 		captured.length = 0;
 		const {stdin, instance} = mount();
 		await instance.waitUntilRenderFlush();
 
-		// A lone `M`/`m` chunk is the SGR terminator of a report whose whole
-		// body was consumed at a prior read boundary. During a flood it is
-		// never user input and must be dropped even if a little wall-clock
-		// time passed between the drained reads.
-		stdin.emit("data", sgr(11, 5));
-		await new Promise(r => setTimeout(r, 60));
-		stdin.emit("data", "M");
-		await new Promise(r => setTimeout(r, 60));
-		stdin.emit("data", "m");
+		// A lone `M`/`m` is the SGR terminator of a report whose whole body was
+		// consumed just before it in the same buffered read. It is never user
+		// input in that position and must be dropped.
+		stdin.emit("data", sgr(11, 5) + "Mm");
 		await instance.waitUntilRenderFlush();
 
 		expect(captured.join("")).toBe("");
+		instance.unmount();
+	});
+
+	it("keeps M-initial typing right after a scroll (man/mkdir/M)", async () => {
+		captured.length = 0;
+		const {stdin, instance} = mount();
+		await instance.waitUntilRenderFlush();
+
+		// The false-positive the lone-terminator match must NOT cause: a user
+		// scrolls, then immediately types a command starting with M/m. The
+		// keystroke arrives inside the 150ms burst window, but it is REAL input
+		// — the residue run ends at the first typed byte, so nothing is eaten.
+		stdin.emit("data", sgr(11, 5)); // scroll consumed
+		stdin.emit("data", "mkdir foo"); // typed immediately after
+		await instance.waitUntilRenderFlush();
+
+		expect(captured.join("")).toBe("mkdir foo");
+		instance.unmount();
+	});
+
+	it("keeps a lone typed M right after a scroll", async () => {
+		captured.length = 0;
+		const {stdin, instance} = mount();
+		await instance.waitUntilRenderFlush();
+
+		// A single `M` typed one keystroke at a time after a scroll: the first
+		// real byte ends the residue run, so even a bare `M` survives.
+		stdin.emit("data", sgr(11, 5));
+		stdin.emit("data", "M");
+		await instance.waitUntilRenderFlush();
+
+		expect(captured.join("")).toBe("M");
+		instance.unmount();
+	});
+
+	it("keeps M-initial typing in a read separate from the flood", async () => {
+		captured.length = 0;
+		const {stdin, instance} = mount();
+		await instance.waitUntilRenderFlush();
+
+		// The flood (with its lone terminators) drains as one buffered read and
+		// is dropped. The user then types an M-initial word — a later, separate
+		// read where no mouse fragment precedes it in the chunk, so its leading
+		// letter is preserved.
+		stdin.emit("data", sgr(11, 5) + "MM"); // flood + tails, one read
+		stdin.emit("data", "man"); // real typing, separate read
+		await instance.waitUntilRenderFlush();
+
+		expect(captured.join("")).toBe("man");
 		instance.unmount();
 	});
 });
