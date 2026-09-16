@@ -267,6 +267,23 @@ describe("ink layer drops split SGR wheel reports (11MMMMMM gibberish)", () => {
 		instance.unmount();
 	});
 
+	it("keeps a typed M before an escape sequence (arrow/Alt) in one read", async () => {
+		captured.length = 0;
+		const {stdin, instance} = mount();
+		await instance.waitUntilRenderFlush();
+
+		// Regression for the review finding: `\x1b` is NOT a mouse-continuation
+		// byte, so a typed `M` immediately followed by an escape sequence (an
+		// arrow key here) in the same read keeps its `M`. The arrow itself is a
+		// mouse-buffer/keypress concern handled elsewhere; what matters is the
+		// leading `M` is not eaten as residue.
+		stdin.emit("data", sgr(11, 5) + "M\x1b[D");
+		await instance.waitUntilRenderFlush();
+
+		expect(captured.join("")).toContain("M");
+		instance.unmount();
+	});
+
 	it("DOC: same-read `M<digit>` after a report drops the M (accepted ambiguity)", async () => {
 		captured.length = 0;
 		const {stdin, instance} = mount();

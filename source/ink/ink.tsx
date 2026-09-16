@@ -1586,19 +1586,23 @@ const BARE_MOUSE_TAIL_RE = /^\d{1,4}[Mm]/;
  *      the same buffered read (`allowLoneTerminator`) — the back-to-back shape
  *      of a flood.
  *   2. Even then, it is only residue when it is at the END of the chunk or is
- *      immediately followed by another mouse-residue byte — another `M`/`m`, or
- *      the `<`/`;`/digit/`\x1b` that begins the next collapsed report. A lone
- *      `M`/`m` followed by any other character (a letter, space, punctuation)
- *      is the start of a typed word and is left untouched, so `man`/`mkdir`
- *      keep their leading letter even when they land in the same read as a
- *      mouse report.
+ *      immediately followed by another headless-mouse-residue byte — another
+ *      `M`/`m`, or the `<`/`;`/digit that begins the next *collapsed* report. A
+ *      lone `M`/`m` followed by any other character (a letter, space, `\x1b`)
+ *      is the start of typed input and is left untouched, so `man`/`mkdir`, and
+ *      a typed `M` before an arrow key / Alt-combo, keep their leading letter.
+ *
+ * `\x1b` is deliberately NOT a continuation byte. A lone `M` abutting a full
+ * ESC-introduced report (`M\x1b[<…M`) is near-impossible in a real flood — a
+ * full report is consumed atomically with its own ESC — whereas typing `M` then
+ * pressing Escape/arrow/Alt is common. Excluding `\x1b` trades that impossible
+ * cosmetic edge for not corrupting a real, frequent keystroke sequence.
  *
  * The lookahead is a positive whitelist (mouse-continuation bytes) rather than
  * a negative one, so it can never accidentally admit a stray typed character:
- * anything not explicitly a mouse byte ends the run.
+ * anything not explicitly a headless-mouse byte ends the run.
  */
-// eslint-disable-next-line no-control-regex
-const LONE_MOUSE_TERMINATOR_RE = /^[Mm](?=$|[Mm<;0-9\x1b])/;
+const LONE_MOUSE_TERMINATOR_RE = /^[Mm](?=$|[Mm<;0-9])/;
 
 const matchOrphanedCSI = (
 	chunk: string,
