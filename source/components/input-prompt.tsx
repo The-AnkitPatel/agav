@@ -7,6 +7,7 @@ import { writeClipboard } from "../ink/termio/clipboard.js";
 import { readdir, realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { ATTACHMENT_TILE_RE, attachmentTileScanner, attachmentTileForId } from "../utils/attachments.js";
+import { VoiceInputController, type AudioRecordingState } from "../voice/index.js";
 
 /** Metadata for a slash command suggestion. */
 export interface CommandInfo {
@@ -57,6 +58,19 @@ const EXCLUDED_DIRECTORIES = new Set([".git", "node_modules", "build", "dist"]);
 
 /** Default prompt prefix width: `"❯ "` is 2 chars. */
 const DEFAULT_PREFIX_WIDTH = 2;
+
+/** Dynamic audio activity waveform animation frames */
+const WAVEFORM_FRAMES = [
+  " ▂▃▅▆▇▆▅▃ ",
+  "▂▃▅▆▇▆▅▃ ▂",
+  "▃▅▆▇▆▅▃ ▂▃",
+  "▅▆▇▆▅▃ ▂▃▅",
+  "▆▇▆▅▃ ▂▃▅▆",
+  "▇▆▅▃ ▂▃▅▆▇",
+  "▆▅▃ ▂▃▅▆▇▆",
+  "▅▃ ▂▃▅▆▇▆▅",
+  "▃ ▂▃▅▆▇▆▅▃",
+];
 
 /** A single rendered row produced by wrapping the prompt text across terminal columns. */
 export interface WrappedLine {
@@ -292,6 +306,85 @@ export default function InputPrompt({ value, onChange: emitValue, onSubmit, onPa
   const linesRef = useRef<DOMElement | null>(null);
   /** Current wrapped lines, kept in a ref so container-level mouse handlers don't need new closures each render. */
   const wrappedLinesRef = useRef<WrappedLine[]>([]);
+
+  // ---------------------------------------------------------------------------
+  // Voice recording and STT state
+  // ---------------------------------------------------------------------------
+  const [voiceState, setVoiceState] = useState<AudioRecordingState>(() => {
+    try {
+      return VoiceInputController.getInstance().getState();
+    } catch {
+      return "idle";
+    }
+  });
+  const [pulse, setPulse] = useState(false);
+  const [partialTranscript, setPartialTranscript] = useState("");
+  const [waveformIndex, setWaveformIndex] = useState(0);
+
+  useEffect(() => {
+    try {
+      const controller = VoiceInputController.getInstance();
+      setVoiceState(controller.getState());
+      const unsubState = controller.onStateChange((state) => {
+        setVoiceState(state);
+        if (state === "idle" || state === "error") {
+          setPartialTranscript("");
+        }
+      });
+      const unsubPartial = controller.onPartialTranscript((text) => {
+        setPartialTranscript(text);
+      });
+      return () => {
+        unsubState();
+        unsubPartial();
+      };
+    } catch {
+      return;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (voiceState !== "recording") {
+      setPulse(false);
+      setWaveformIndex(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setPulse((p) => !p);
+      setWaveformIndex((idx) => (idx + 1) % WAVEFORM_FRAMES.length);
+    }, 120);
+    return () => clearInterval(interval);
+  }, [voiceState]);
+
+  const voiceHotkey = formatUsableKeybinding(keybindings, "toggleVoiceInput", enhancedKeyboard) || "Ctrl+B";
+
+  const handleToggleVoice = async () => {
+    try {
+      const controller = VoiceInputController.getInstance();
+      const currentState = controller.getState();
+      if (currentState === "idle" || currentState === "error") {
+        await controller.start();
+      } else if (currentState === "recording") {
+        const text = await controller.stop();
+        if (text && text.trim()) {
+          deleteSelection();
+          const v = liveRef.current.value;
+          const c = Math.min(liveRef.current.cursor, v.length);
+          const before = v.slice(0, c);
+          const after = v.slice(c);
+          const prefix = before.length > 0 && !/\s$/.test(before) ? " " : "";
+          const suffix = after.length > 0 && !/^\s/.test(after) ? " " : "";
+          const toInsert = `${prefix}${text.trim()}${suffix}`;
+          applyEdit(before + toInsert + after, c + toInsert.length);
+          clearSelection();
+        }
+      } else if (currentState === "transcribing") {
+        // Ignore keypresses while transcribing
+      }
+    } catch {
+      // Controller transitions state to error on failure
+    }
+  };
 
   // ---------------------------------------------------------------------------
   // Text selection state.  Selection is tracked as a pair of buffer offsets
@@ -541,6 +634,30 @@ export default function InputPrompt({ value, onChange: emitValue, onSubmit, onPa
       const { input, key } = normalizeKeyEvent(rawInput, rawKey);
       const match = keyResolverRef.current.feed(input, key);
       if (match.pending) return;
+
+      // Voice input toggle hotkey
+      if (match.action === "toggleVoiceInput") {
+        handleToggleVoice();
+        return;
+      }
+
+      // If transcribing, lock input until transcription completes to avoid race conditions
+      if (voiceState === "transcribing") {
+        return;
+      }
+
+      // If recording, pressing Enter stops recording and inserts transcription
+      if (voiceState === "recording" && (match.action === "submit" || key.return)) {
+        handleToggleVoice();
+        return;
+      }
+
+      if (voiceState === "recording" && match.action === "cancel") {
+        try {
+          VoiceInputController.getInstance().cancel();
+        } catch {}
+        return;
+      }
 
       // Shift+Arrow: extend or create a selection.
       if (key.shift && (key.leftArrow || key.rightArrow)) {
@@ -1007,6 +1124,11 @@ export default function InputPrompt({ value, onChange: emitValue, onSubmit, onPa
               {renderPrefix(true)}
               <Text inverse> </Text>
               <Text dimColor>{agentLock ? `Ask ${agentLock}...` : "Type a message..."}</Text>
+              {voiceState === "idle" && (
+                <Box onClick={(e) => { e.stopPropagation?.(); handleToggleVoice(); }}>
+                  <Text dimColor>  [{voiceHotkey} 🎤 Mic]</Text>
+                </Box>
+              )}
             </Box>
           );
         }
@@ -1118,6 +1240,40 @@ export default function InputPrompt({ value, onChange: emitValue, onSubmit, onPa
       {isMultiline && (
         <Box marginTop={1}>
           <Text dimColor>  {formatKeybinding(keybindings, "submit")} to send · {formatUsableKeybinding(keybindings, "newline", enhancedKeyboard)} for newline</Text>
+        </Box>
+      )}
+      {voiceState !== "idle" && (
+        <Box marginTop={0} flexDirection="column">
+          {voiceState === "recording" ? (
+            <Box flexDirection="column" onClick={(e) => { e.stopPropagation?.(); handleToggleVoice(); }}>
+              <Box>
+                <Text bold color="red">
+                  <Text color={pulse ? "redBright" : "red"}>●</Text> [Recording... Press {voiceHotkey} or Enter to finish]
+                </Text>
+                <Text color="cyanBright"> {WAVEFORM_FRAMES[waveformIndex]}</Text>
+              </Box>
+              {partialTranscript ? (
+                <Box marginTop={0}>
+                  <Text color="greenBright">🎙️  </Text>
+                  <Text color="white" italic>"{partialTranscript}"</Text>
+                </Box>
+              ) : null}
+            </Box>
+          ) : voiceState === "transcribing" ? (
+            <Box flexDirection="column">
+              <Text bold color="yellow">⏳ [Transcribing speech locally...]</Text>
+              {partialTranscript ? (
+                <Box marginTop={0}>
+                  <Text color="greenBright">🎙️  </Text>
+                  <Text dimColor italic>"{partialTranscript}"</Text>
+                </Box>
+              ) : null}
+            </Box>
+          ) : voiceState === "error" ? (
+            <Box onClick={(e) => { e.stopPropagation?.(); handleToggleVoice(); }}>
+              <Text bold color="red">❌ [Voice input error. Press {voiceHotkey} to retry]</Text>
+            </Box>
+          ) : null}
         </Box>
       )}
     </Box>

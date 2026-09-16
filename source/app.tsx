@@ -22,6 +22,7 @@ import { isInternalUserMessage } from "./agent/internal-prompts.js";
 import { CommandRegistry, isCommandAllowedMidTurn } from "./commands/registry.js";
 import { AgentsTUI } from "./components/agents-tui.js";
 import { SkillsTUI } from "./components/skills-tui.js";
+import { RepoMapView } from "./components/repo-map-view.js";
 import { saveSession } from "./config/history.js";
 import {
   type Attachment,
@@ -143,6 +144,9 @@ export default function App({ config: initialConfig, keybindings, resumeMessages
   const agentsTUIResolveRef = useRef<(() => void) | null>(null);
   const [skillsTUIActive, setSkillsTUIActive] = useState(false);
   const skillsTUIResolveRef = useRef<(() => void) | null>(null);
+  const [repoMapTUIActive, setRepoMapTUIActive] = useState(false);
+  const [repoMapOptions, setRepoMapOptions] = useState<{ budget?: number; focus?: string }>({});
+  const repoMapTUIResolveRef = useRef<(() => void) | null>(null);
   const { exit: exitInk, suspendTerminalSync, resetDisplay } = useApp();
   const commandRegistryRef = useRef(new CommandRegistry());
   const keyResolverRef = useRef(new KeybindingResolver(keybindings, GLOBAL_ACTIONS));
@@ -776,6 +780,11 @@ export default function App({ config: initialConfig, keybindings, resumeMessages
             skillsTUIResolveRef.current = onDone;
             setSkillsTUIActive(true);
           },
+          showRepoMapTUI: (onDone: () => void, options?: { budget?: number; focus?: string }) => {
+            repoMapTUIResolveRef.current = onDone;
+            setRepoMapOptions(options ?? {});
+            setRepoMapTUIActive(true);
+          },
         });
 
         setRunningSkillName(null);
@@ -1120,6 +1129,20 @@ export default function App({ config: initialConfig, keybindings, resumeMessages
             setInput("");
             const resolve = skillsTUIResolveRef.current;
             skillsTUIResolveRef.current = null;
+            resolve?.();
+          }}
+        />
+      )}
+      {repoMapTUIActive && (
+        <RepoMapView
+          initialBudget={repoMapOptions.budget}
+          focusFile={repoMapOptions.focus}
+          onExit={() => {
+            setRepoMapTUIActive(false);
+            setPickerActive(false);
+            setInput("");
+            const resolve = repoMapTUIResolveRef.current;
+            repoMapTUIResolveRef.current = null;
             resolve?.();
           }}
         />

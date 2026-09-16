@@ -630,6 +630,7 @@ export default class Ink {
 			// A raw-stdout caller commonly pauses stdin on its way out, which
 			// would leave Ink deaf now that its listener is back.
 			if (this.isRawModeEnabled && stdin.isTTY) {
+				stdin.setRawMode(true);
 				stdin.resume();
 			}
 
