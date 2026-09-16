@@ -244,4 +244,44 @@ describe("ink layer drops split SGR wheel reports (11MMMMMM gibberish)", () => {
 		expect(captured.join("")).toBe("");
 		instance.unmount();
 	});
+
+	// --- Documented, intentional trade-offs (raised in review) ---------------
+
+	it("DOC: a cross-read lone M is NOT dropped (protects M-command typing)", async () => {
+		captured.length = 0;
+		const {stdin, instance} = mount();
+		await instance.waitUntilRenderFlush();
+
+		// A lone `M` that arrives in its OWN read after a mouse report in a
+		// prior read is byte- and timing-identical to a user pressing `M`. We
+		// deliberately let it through: dropping it (window-based) would eat the
+		// leading letter of every `man`/`mkdir`/`More` typed after a scroll,
+		// which is real data loss. A stray single `M` from the rare read-split
+		// case is cosmetic by comparison. Real floods arrive same-read (dropped
+		// above), so this cross-read leak is a low-frequency edge, not the bug.
+		stdin.emit("data", sgr(11, 5)); // report, one read
+		stdin.emit("data", "M"); // lone M, separate read -> kept
+		await instance.waitUntilRenderFlush();
+
+		expect(captured.join("")).toBe("M");
+		instance.unmount();
+	});
+
+	it("DOC: same-read `M<digit>` after a report drops the M (accepted ambiguity)", async () => {
+		captured.length = 0;
+		const {stdin, instance} = mount();
+		await instance.waitUntilRenderFlush();
+
+		// `M1` batched into the SAME read as a mouse report is indistinguishable
+		// from a collapsed `M`+`11M` flood tail — the same ambiguity already
+		// documented for the numeric `1;2m` case. Keeping the M's residue
+		// lookahead broad here is what guarantees ZERO flood leakage (the
+		// primary goal); narrowing it would re-leak a stray `M` per report on
+		// every scroll. This only bites the rare same-read `M<digit>` typing.
+		stdin.emit("data", sgr(11, 5) + "M1");
+		await instance.waitUntilRenderFlush();
+
+		expect(captured.join("")).toBe("1");
+		instance.unmount();
+	});
 });
