@@ -51,6 +51,7 @@ import { isDestructiveCommand, isBlockedCommand, analyzeCommandSafety } from "..
 import { repairAndParseJson, validateToolArgs } from "../utils/json-repair.js";
 import { Reviewer } from "./reviewer.js";
 import { PermissionManager } from "../config/permissions.js";
+import { getContextLimits } from "../utils/tokens.js";
 
 interface LoopParams {
   provider: LLMProvider;
@@ -215,6 +216,15 @@ export async function* runAgentLoop(
   }
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
+    // Proactive context trimming (P2.3): condense tool outputs older than 2 turns
+    conversation.proactiveTrimToolResults(2);
+
+    // Context threshold monitoring (P2.3): verify context usage under 85% of limit
+    const limits = getContextLimits(model, conversation.getContextWindow());
+    if (conversation.tokenCount >= Math.floor(limits.maxTokens * 0.85)) {
+      await conversation.compactIfNeeded(false, summarize);
+    }
+
     // Auto-compact if conversation is getting long
     const { compacted, droppedCount } = await conversation.compactIfNeeded(false, summarize);
     if (compacted) {
