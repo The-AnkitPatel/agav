@@ -49,6 +49,7 @@ import type { PermissionMode } from "../config/config.js";
 import { runHook, getHookForTool } from "./hooks.js";
 import { isDestructiveCommand, isBlockedCommand, analyzeCommandSafety } from "../utils/sandbox.js";
 import { repairAndParseJson, validateToolArgs } from "../utils/json-repair.js";
+import { Reviewer } from "./reviewer.js";
 
 interface LoopParams {
   provider: LLMProvider;
@@ -74,6 +75,9 @@ interface LoopParams {
   cwd?: string;
   turnId?: string;
   parentTurnId?: string;
+  autoReview?: boolean;
+  reviewCommand?: string;
+  maxReviewRetries?: number;
 }
 
 // Tools that never need confirmation because they cannot modify the working
@@ -140,6 +144,8 @@ export async function* runAgentLoop(
   let permissionMode = params.permissionMode ?? "ask";
   let testRepairAttempts = 0;
   const MAX_REPAIR_ATTEMPTS = 3;
+  let reviewAttempts = 0;
+  const maxReviewAttempts = params.maxReviewRetries ?? 3;
   let madeEdits = false;
   let ranShellAfterEdit = false;
   let lastShellFailed = false;
@@ -351,6 +357,37 @@ export async function* runAgentLoop(
         verifyReprompts++;
         conversation.addInternalUserMessage(needsVerify ? NEEDS_VERIFY_PROMPT : VERIFY_FAILED_PROMPT);
         continue;
+      }
+
+      // Automated Verification Reviewer Loop (P2.1)
+      if (params.autoReview && madeEdits && reviewAttempts < maxReviewAttempts) {
+        const reviewResult = await Reviewer.runReview({
+          cwd: loopCwd,
+          command: params.reviewCommand,
+        });
+
+        if (!reviewResult.skipped) {
+          if (!reviewResult.passed) {
+            reviewAttempts++;
+            yield {
+              type: "tool_result",
+              toolName: "reviewer",
+              output: `Automated test verification failed (attempt ${reviewAttempts}/${maxReviewAttempts}):\n${reviewResult.failureSnippet ?? reviewResult.summary}`,
+              isError: true,
+            };
+            conversation.addInternalUserMessage(
+              Reviewer.synthesizeRepairPrompt(reviewResult, reviewAttempts, maxReviewAttempts),
+            );
+            continue;
+          } else {
+            yield {
+              type: "tool_result",
+              toolName: "reviewer",
+              output: `Automated test verification passed cleanly in ${reviewResult.durationMs}ms (\`${reviewResult.command}\`).`,
+              isError: false,
+            };
+          }
+        }
       }
       // A directive queued after the final tool round would otherwise sit in the
       // queue forever — this is the loop's last exit before max-iterations.

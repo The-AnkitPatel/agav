@@ -81,6 +81,9 @@ export interface AgavConfig {
   fallbackProviders?: string[];
   fallbackOrder?: string[];
   maxFallbacks?: number;
+  autoReview?: boolean;
+  reviewCommand?: string;
+  maxReviewRetries?: number;
 }
 
 const AGAV_DIR = join(homedir(), ".agav");
@@ -246,6 +249,21 @@ const PROJECT_CONFIG_TEMPLATE = {
         args: ["-y", "@modelcontextprotocol/server-everything"],
       },
     },
+  },
+  autoReview: {
+    description: "Whether to automatically run project tests after the agent edits code.",
+    type: "boolean",
+    eg: false,
+  },
+  reviewCommand: {
+    description: "Custom test/verification command to run for automated review (e.g. 'pnpm test').",
+    type: "string",
+    eg: "pnpm test",
+  },
+  maxReviewRetries: {
+    description: "Maximum repair turns allowed when automated review tests fail.",
+    type: "number",
+    eg: 3,
   },
 } as const;
 

@@ -28,6 +28,7 @@ import { openCommand } from "./open.js"
 import { repoMapCommand } from "./repomap.js"
 import { keysCommand } from "./keys.js"
 import { micCommand } from "./mic.js"
+import { reviewCommand } from "./review.js"
 export { MID_TURN_SAFE_COMMANDS, isCommandAllowedMidTurn } from "./mid-turn.js"
 
 /** Store slash commands and dispatch raw user input to the matching handler. */
@@ -70,6 +71,7 @@ export class CommandRegistry {
     this.register(repoMapCommand)
     this.register(keysCommand)
     this.register(micCommand)
+    this.register(reviewCommand)
   }
 
   /** Add a command to the registry by name. */
