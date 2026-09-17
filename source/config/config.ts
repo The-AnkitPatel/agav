@@ -33,13 +33,14 @@ export interface AgavHooks {
 }
 
 export interface AgavConfig {
-  provider: "anthropic" | "openai" | "openrouter" | "nvidia" | "deepseek" | "ollama" | "gemini" | "vertex-ai";
+  provider: "anthropic" | "openai" | "openrouter" | "nvidia" | "deepseek" | "ollama" | "gemini" | "vertex-ai" | "groq";
   model: string;
   anthropicApiKey?: string;
   openaiApiKey?: string;
   openrouterApiKey?: string;
   nvidiaApiKey?: string;
   deepseekApiKey?: string;
+  groqApiKey?: string;
   openaiApi?: "chat" | "responses";
   // Override the OpenAI provider's base URL to target an OpenAI-compatible
   // endpoint (self-hosted gateway, private deployment, or any vendor that
@@ -75,6 +76,7 @@ export interface AgavConfig {
   nvidiaApiKeys?: string[];
   deepseekApiKeys?: string[];
   geminiApiKeys?: string[];
+  groqApiKeys?: string[];
   fallbackMesh?: boolean;
   fallbackProviders?: string[];
   fallbackOrder?: string[];
@@ -331,6 +333,8 @@ const PROJECT_CONFIG_DENY = new Set<string>([
   "nvidiaApiKeys",
   "deepseekApiKeys",
   "geminiApiKeys",
+  "groqApiKey",
+  "groqApiKeys",
   "permissionMode",
 ]);
 
@@ -416,6 +420,12 @@ export async function loadConfig(): Promise<AgavConfig> {
     globalConfig.geminiApiKey ??
     DEFAULT_CONFIG.geminiApiKey ?? "",
   ) || undefined;
+  merged.groqApiKey = decrypt(
+    process.env["GROQ_API_KEY"] ??
+    projectConfig.groqApiKey ??
+    globalConfig.groqApiKey ??
+    DEFAULT_CONFIG.groqApiKey ?? "",
+  ) || undefined;
 
   // Vertex AI — the credentials path alone enables the provider; there is no
   // separate on/off flag to keep in sync with it.
@@ -468,6 +478,9 @@ export async function loadConfig(): Promise<AgavConfig> {
   if (Array.isArray(globalConfig.geminiApiKeys)) {
     merged.geminiApiKeys = globalConfig.geminiApiKeys.map((k) => decrypt(String(k))).filter(Boolean);
   }
+  if (Array.isArray(globalConfig.groqApiKeys)) {
+    merged.groqApiKeys = globalConfig.groqApiKeys.map((k) => decrypt(String(k))).filter(Boolean);
+  }
 
   return merged;
 }
@@ -475,7 +488,7 @@ export async function loadConfig(): Promise<AgavConfig> {
 /** Persist config to the global config file, encrypting any API keys present. */
 export async function saveConfig(config: AgavConfig): Promise<void> {
   await ensureDir(AGAV_DIR);
-  const { anthropicApiKey, openaiApiKey, openrouterApiKey, nvidiaApiKey, deepseekApiKey, geminiApiKey, ollamaApiKey, ...safe } = config;
+  const { anthropicApiKey, openaiApiKey, openrouterApiKey, nvidiaApiKey, deepseekApiKey, geminiApiKey, groqApiKey, ollamaApiKey, ...safe } = config;
   const out: Record<string, unknown> = { ...safe };
   if (anthropicApiKey) out.anthropicApiKey = encrypt(anthropicApiKey);
   if (openaiApiKey) out.openaiApiKey = encrypt(openaiApiKey);
@@ -483,6 +496,7 @@ export async function saveConfig(config: AgavConfig): Promise<void> {
   if (nvidiaApiKey) out.nvidiaApiKey = encrypt(nvidiaApiKey);
   if (deepseekApiKey) out.deepseekApiKey = encrypt(deepseekApiKey);
   if (geminiApiKey) out.geminiApiKey = encrypt(geminiApiKey);
+  if (groqApiKey) out.groqApiKey = encrypt(groqApiKey);
   if (ollamaApiKey) out.ollamaApiKey = encrypt(ollamaApiKey);
 
   if (Array.isArray(config.anthropicApiKeys)) {
@@ -502,6 +516,9 @@ export async function saveConfig(config: AgavConfig): Promise<void> {
   }
   if (Array.isArray(config.geminiApiKeys)) {
     out.geminiApiKeys = config.geminiApiKeys.map((k) => encrypt(String(k)));
+  }
+  if (Array.isArray(config.groqApiKeys)) {
+    out.groqApiKeys = config.groqApiKeys.map((k) => encrypt(String(k)));
   }
 
   await writeFile(CONFIG_PATH, JSON.stringify(out, null, 2) + "\n");

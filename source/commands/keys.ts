@@ -19,6 +19,8 @@ function getProviderKeyField(provider: string): { single: keyof AgavConfig; mult
       return { single: "deepseekApiKey", multi: "deepseekApiKeys" };
     case "gemini":
       return { single: "geminiApiKey", multi: "geminiApiKeys" };
+    case "groq":
+      return { single: "groqApiKey", multi: "groqApiKeys" };
     case "ollama":
       return { single: "ollamaApiKey", multi: "ollamaApiKey" as any };
     default:
