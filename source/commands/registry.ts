@@ -30,6 +30,7 @@ import { keysCommand } from "./keys.js"
 import { micCommand } from "./mic.js"
 import { reviewCommand } from "./review.js"
 import { permissionsCommand } from "./permissions.js"
+import { tasksCommand } from "./tasks.js"
 export { MID_TURN_SAFE_COMMANDS, isCommandAllowedMidTurn } from "./mid-turn.js"
 
 /** Store slash commands and dispatch raw user input to the matching handler. */
@@ -74,6 +75,7 @@ export class CommandRegistry {
     this.register(micCommand)
     this.register(reviewCommand)
     this.register(permissionsCommand)
+    this.register(tasksCommand)
   }
 
   /** Add a command to the registry by name. */

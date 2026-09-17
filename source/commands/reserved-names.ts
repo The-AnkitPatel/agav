@@ -11,5 +11,5 @@ export const RESERVED_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "remember", "forget", "fast", "deep", "undo", "plan", "debug",
   "search", "loop", "schedule", "skills", "steer", "changelog",
   "context", "agents", "open", "repomap", "keys", "mic", "review",
-  "permissions",
+  "permissions", "tasks",
 ]);
