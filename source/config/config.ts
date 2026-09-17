@@ -325,6 +325,12 @@ const PROJECT_CONFIG_DENY = new Set<string>([
   "nvidiaApiKey",
   "deepseekApiKey",
   "geminiApiKey",
+  "anthropicApiKeys",
+  "openaiApiKeys",
+  "openrouterApiKeys",
+  "nvidiaApiKeys",
+  "deepseekApiKeys",
+  "geminiApiKeys",
   "permissionMode",
 ]);
 
@@ -443,6 +449,26 @@ export async function loadConfig(): Promise<AgavConfig> {
     DEFAULT_CONFIG.ollamaApiKey ?? "",
   ) || undefined;
 
+  // Decrypt multi-key arrays loaded from global config
+  if (Array.isArray(globalConfig.anthropicApiKeys)) {
+    merged.anthropicApiKeys = globalConfig.anthropicApiKeys.map((k) => decrypt(String(k))).filter(Boolean);
+  }
+  if (Array.isArray(globalConfig.openaiApiKeys)) {
+    merged.openaiApiKeys = globalConfig.openaiApiKeys.map((k) => decrypt(String(k))).filter(Boolean);
+  }
+  if (Array.isArray(globalConfig.openrouterApiKeys)) {
+    merged.openrouterApiKeys = globalConfig.openrouterApiKeys.map((k) => decrypt(String(k))).filter(Boolean);
+  }
+  if (Array.isArray(globalConfig.nvidiaApiKeys)) {
+    merged.nvidiaApiKeys = globalConfig.nvidiaApiKeys.map((k) => decrypt(String(k))).filter(Boolean);
+  }
+  if (Array.isArray(globalConfig.deepseekApiKeys)) {
+    merged.deepseekApiKeys = globalConfig.deepseekApiKeys.map((k) => decrypt(String(k))).filter(Boolean);
+  }
+  if (Array.isArray(globalConfig.geminiApiKeys)) {
+    merged.geminiApiKeys = globalConfig.geminiApiKeys.map((k) => decrypt(String(k))).filter(Boolean);
+  }
+
   return merged;
 }
 
@@ -458,6 +484,26 @@ export async function saveConfig(config: AgavConfig): Promise<void> {
   if (deepseekApiKey) out.deepseekApiKey = encrypt(deepseekApiKey);
   if (geminiApiKey) out.geminiApiKey = encrypt(geminiApiKey);
   if (ollamaApiKey) out.ollamaApiKey = encrypt(ollamaApiKey);
+
+  if (Array.isArray(config.anthropicApiKeys)) {
+    out.anthropicApiKeys = config.anthropicApiKeys.map((k) => encrypt(String(k)));
+  }
+  if (Array.isArray(config.openaiApiKeys)) {
+    out.openaiApiKeys = config.openaiApiKeys.map((k) => encrypt(String(k)));
+  }
+  if (Array.isArray(config.openrouterApiKeys)) {
+    out.openrouterApiKeys = config.openrouterApiKeys.map((k) => encrypt(String(k)));
+  }
+  if (Array.isArray(config.nvidiaApiKeys)) {
+    out.nvidiaApiKeys = config.nvidiaApiKeys.map((k) => encrypt(String(k)));
+  }
+  if (Array.isArray(config.deepseekApiKeys)) {
+    out.deepseekApiKeys = config.deepseekApiKeys.map((k) => encrypt(String(k)));
+  }
+  if (Array.isArray(config.geminiApiKeys)) {
+    out.geminiApiKeys = config.geminiApiKeys.map((k) => encrypt(String(k)));
+  }
+
   await writeFile(CONFIG_PATH, JSON.stringify(out, null, 2) + "\n");
 }
 
