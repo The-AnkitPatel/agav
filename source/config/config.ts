@@ -69,6 +69,16 @@ export interface AgavConfig {
   agentMarketplace?: string; // URL to agent marketplace repository
   hideAbsolutePath?: boolean;
   showThinking?: boolean;
+  anthropicApiKeys?: string[];
+  openaiApiKeys?: string[];
+  openrouterApiKeys?: string[];
+  nvidiaApiKeys?: string[];
+  deepseekApiKeys?: string[];
+  geminiApiKeys?: string[];
+  fallbackMesh?: boolean;
+  fallbackProviders?: string[];
+  fallbackOrder?: string[];
+  maxFallbacks?: number;
 }
 
 const AGAV_DIR = join(homedir(), ".agav");
