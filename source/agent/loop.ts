@@ -50,6 +50,7 @@ import { runHook, getHookForTool } from "./hooks.js";
 import { isDestructiveCommand, isBlockedCommand, analyzeCommandSafety } from "../utils/sandbox.js";
 import { repairAndParseJson, validateToolArgs } from "../utils/json-repair.js";
 import { Reviewer } from "./reviewer.js";
+import { PermissionManager } from "../config/permissions.js";
 
 interface LoopParams {
   provider: LLMProvider;
@@ -78,6 +79,7 @@ interface LoopParams {
   autoReview?: boolean;
   reviewCommand?: string;
   maxReviewRetries?: number;
+  permissionManager?: PermissionManager;
 }
 
 // Tools that never need confirmation because they cannot modify the working
@@ -136,6 +138,7 @@ export async function* runAgentLoop(
 ): AsyncGenerator<AgentEvent> {
   const { provider, conversation, toolRegistry, model, systemPrompt, effort, maxTokens, signal, confirmTool } = params;
   const loopCwd = params.cwd ?? toolRegistry.getDefaultContext()?.cwd ?? process.cwd();
+  const permissionManager = params.permissionManager ?? (await PermissionManager.load(loopCwd));
   const turnSnapshot = startTurnSnapshot({
     id: params.turnId,
     workspaceRoot: loopCwd,
@@ -459,15 +462,31 @@ export async function* runAgentLoop(
         continue;
       }
 
+      // Granular Persistent Permissions check (.agav/permissions.json)
+      const policyAction = permissionManager.evaluate(call.name, input);
+
+      if (policyAction === "deny") {
+        const reason = `Blocked: Tool '${call.name}' is denied by permission policy (.agav/permissions.json).`;
+        toolResults.push({ type: "tool_result", toolCallId: id, toolResult: reason, isError: true });
+        yield { type: "tool_result", toolName: call.name, toolCallId: id, output: reason, isError: true };
+        continue;
+      }
+
+      const policyAllowed = policyAction === "allow";
+      const policyAsk = policyAction === "ask";
+
       const destructiveApproved = isDestructive
-        && isAllowed(call.name, input, params.allowedTools, { requirePattern: true });
+        && (policyAllowed || isAllowed(call.name, input, params.allowedTools, { requirePattern: true }));
       const denyWrites = permissionMode === "deny-writes";
       const trustedSafe = toolDestructiveFlag === false && SAFE_TOOLS.has(call.name);
-      const needsConfirm = (isDestructive && !destructiveApproved)
+      const needsConfirm = !policyAllowed && (
+        policyAsk
+        || (isDestructive && !destructiveApproved)
         || (!SAFE_TOOLS.has(call.name)
           && !trustedSafe
           && permissionMode !== "auto-accept"
-          && !isAllowed(call.name, input, params.allowedTools));
+          && !isAllowed(call.name, input, params.allowedTools))
+      );
       if ((denyWrites && (isDestructive || WRITE_TOOLS.has(call.name))) || (needsConfirm && (denyWrites || !confirmTool))) {
         const reason = denyWrites
           ? "Write operations are denied (--deny-writes mode)."
