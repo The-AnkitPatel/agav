@@ -2,7 +2,7 @@ import type { ToolDefinition, ToolResult } from "./types.js";
 import {
   runInSandbox,
   detectSandboxBackend,
-  isDestructiveCommand,
+  analyzeCommandSafety,
   type SandboxBackend,
 } from "../utils/sandbox.js";
 
@@ -32,22 +32,32 @@ export const shellTool: ToolDefinition = {
     },
   },
 
-  async execute(input): Promise<ToolResult> {
+  async execute(input, context): Promise<ToolResult> {
+    const cwd = context?.cwd ?? process.cwd();
     const command = String(input.command);
     const forceBackend = typeof input.sandbox === "string"
       ? input.sandbox as SandboxBackend
       : undefined;
 
-    if (isDestructiveCommand(command)) {
+    const analysis = analyzeCommandSafety(command);
+
+    if (analysis.level === "blocked") {
       return {
-        output: `Blocked: "${command}" matches a destructive command pattern. This command requires explicit user confirmation and cannot be auto-approved.`,
+        output: `Blocked: "${command}" matches a critically dangerous command pattern (${analysis.reason ?? "catastrophic command"}). This command is blocked unconditionally.`,
+        isError: true,
+      };
+    }
+
+    if (analysis.level === "destructive" && !context?.confirmed) {
+      return {
+        output: `Blocked: "${command}" matches a destructive command pattern (${analysis.reason ?? "destructive command"}). This command requires explicit user confirmation and cannot be auto-approved.`,
         isError: true,
       };
     }
 
     const { stdout, stderr, error } = await runInSandbox({
       command,
-      cwd: process.cwd(),
+      cwd,
       timeout: DEFAULT_TIMEOUT,
       maxBuffer: MAX_OUTPUT * 2,
       forceBackend,
