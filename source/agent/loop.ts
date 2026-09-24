@@ -49,6 +49,9 @@ import type { PermissionMode } from "../config/config.js";
 import { runHook, getHookForTool } from "./hooks.js";
 import { isDestructiveCommand, isBlockedCommand, analyzeCommandSafety } from "../utils/sandbox.js";
 import { repairAndParseJson, validateToolArgs } from "../utils/json-repair.js";
+import { Reviewer } from "./reviewer.js";
+import { PermissionManager } from "../config/permissions.js";
+import { getContextLimits } from "../utils/tokens.js";
 
 interface LoopParams {
   provider: LLMProvider;
@@ -74,6 +77,10 @@ interface LoopParams {
   cwd?: string;
   turnId?: string;
   parentTurnId?: string;
+  autoReview?: boolean;
+  reviewCommand?: string;
+  maxReviewRetries?: number;
+  permissionManager?: PermissionManager;
 }
 
 // Tools that never need confirmation because they cannot modify the working
@@ -131,7 +138,8 @@ export async function* runAgentLoop(
   params: LoopParams,
 ): AsyncGenerator<AgentEvent> {
   const { provider, conversation, toolRegistry, model, systemPrompt, effort, maxTokens, signal, confirmTool } = params;
-  const loopCwd = params.cwd ?? process.cwd();
+  const loopCwd = params.cwd ?? toolRegistry.getDefaultContext()?.cwd ?? process.cwd();
+  const permissionManager = params.permissionManager ?? (await PermissionManager.load(loopCwd));
   const turnSnapshot = startTurnSnapshot({
     id: params.turnId,
     workspaceRoot: loopCwd,
@@ -140,6 +148,8 @@ export async function* runAgentLoop(
   let permissionMode = params.permissionMode ?? "ask";
   let testRepairAttempts = 0;
   const MAX_REPAIR_ATTEMPTS = 3;
+  let reviewAttempts = 0;
+  const maxReviewAttempts = params.maxReviewRetries ?? 3;
   let madeEdits = false;
   let ranShellAfterEdit = false;
   let lastShellFailed = false;
@@ -206,6 +216,15 @@ export async function* runAgentLoop(
   }
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
+    // Proactive context trimming (P2.3): condense tool outputs older than 2 turns
+    conversation.proactiveTrimToolResults(2);
+
+    // Context threshold monitoring (P2.3): verify context usage under 85% of limit
+    const limits = getContextLimits(model, conversation.getContextWindow());
+    if (conversation.tokenCount >= Math.floor(limits.maxTokens * 0.85)) {
+      await conversation.compactIfNeeded(false, summarize);
+    }
+
     // Auto-compact if conversation is getting long
     const { compacted, droppedCount } = await conversation.compactIfNeeded(false, summarize);
     if (compacted) {
@@ -352,6 +371,37 @@ export async function* runAgentLoop(
         conversation.addInternalUserMessage(needsVerify ? NEEDS_VERIFY_PROMPT : VERIFY_FAILED_PROMPT);
         continue;
       }
+
+      // Automated Verification Reviewer Loop (P2.1)
+      if (params.autoReview && madeEdits && reviewAttempts < maxReviewAttempts) {
+        const reviewResult = await Reviewer.runReview({
+          cwd: loopCwd,
+          command: params.reviewCommand,
+        });
+
+        if (!reviewResult.skipped) {
+          if (!reviewResult.passed) {
+            reviewAttempts++;
+            yield {
+              type: "tool_result",
+              toolName: "reviewer",
+              output: `Automated test verification failed (attempt ${reviewAttempts}/${maxReviewAttempts}):\n${reviewResult.failureSnippet ?? reviewResult.summary}`,
+              isError: true,
+            };
+            conversation.addInternalUserMessage(
+              Reviewer.synthesizeRepairPrompt(reviewResult, reviewAttempts, maxReviewAttempts),
+            );
+            continue;
+          } else {
+            yield {
+              type: "tool_result",
+              toolName: "reviewer",
+              output: `Automated test verification passed cleanly in ${reviewResult.durationMs}ms (\`${reviewResult.command}\`).`,
+              isError: false,
+            };
+          }
+        }
+      }
       // A directive queued after the final tool round would otherwise sit in the
       // queue forever — this is the loop's last exit before max-iterations.
       // Deliver it as a fresh user turn so it still reaches the model (and the
@@ -400,14 +450,6 @@ export async function* runAgentLoop(
         }
       }
 
-      // Hard block: lethal commands are blocked unconditionally
-      if ((call.name === "run_command" || call.name === "shell") && isBlockedCommand(String(input.command ?? ""))) {
-        const analysis = analyzeCommandSafety(String(input.command ?? ""));
-        const reason = `Blocked: Command is critically dangerous and cannot be executed (${analysis.reason ?? "catastrophic operation"}).`;
-        toolResults.push({ type: "tool_result", toolCallId: id, toolResult: reason, isError: true });
-        yield { type: "tool_result", toolName: call.name, toolCallId: id, output: reason, isError: true };
-        continue;
-      }
       const toolDestructiveFlag = tool?.schema.destructive;
 
       // Only trust destructive:false from builtin tools (SAFE_TOOLS).
@@ -421,15 +463,40 @@ export async function* runAgentLoop(
         isDestructive = call.name === "run_command" && isDestructiveCommand(String(input.command ?? ""));
       }
 
+      // Hard block: lethal commands are blocked unconditionally
+      if (call.name === "run_command" && isBlockedCommand(String(input.command ?? ""))) {
+        const analysis = analyzeCommandSafety(String(input.command ?? ""));
+        const reason = `Blocked: Command is critically dangerous and cannot be executed (${analysis.reason ?? "catastrophic operation"}).`;
+        toolResults.push({ type: "tool_result", toolCallId: id, toolResult: reason, isError: true });
+        yield { type: "tool_result", toolName: call.name, toolCallId: id, output: reason, isError: true };
+        continue;
+      }
+
+      // Granular Persistent Permissions check (.agav/permissions.json)
+      const policyAction = permissionManager.evaluate(call.name, input);
+
+      if (policyAction === "deny") {
+        const reason = `Blocked: Tool '${call.name}' is denied by permission policy (.agav/permissions.json).`;
+        toolResults.push({ type: "tool_result", toolCallId: id, toolResult: reason, isError: true });
+        yield { type: "tool_result", toolName: call.name, toolCallId: id, output: reason, isError: true };
+        continue;
+      }
+
+      const policyAllowed = policyAction === "allow";
+      const policyAsk = policyAction === "ask";
+
       const destructiveApproved = isDestructive
-        && isAllowed(call.name, input, params.allowedTools, { requirePattern: true });
+        && (policyAllowed || isAllowed(call.name, input, params.allowedTools, { requirePattern: true }));
       const denyWrites = permissionMode === "deny-writes";
       const trustedSafe = toolDestructiveFlag === false && SAFE_TOOLS.has(call.name);
-      const needsConfirm = (isDestructive && !destructiveApproved)
+      const needsConfirm = !policyAllowed && (
+        policyAsk
+        || (isDestructive && !destructiveApproved)
         || (!SAFE_TOOLS.has(call.name)
           && !trustedSafe
           && permissionMode !== "auto-accept"
-          && !isAllowed(call.name, input, params.allowedTools));
+          && !isAllowed(call.name, input, params.allowedTools))
+      );
       if ((denyWrites && (isDestructive || WRITE_TOOLS.has(call.name))) || (needsConfirm && (denyWrites || !confirmTool))) {
         const reason = denyWrites
           ? "Write operations are denied (--deny-writes mode)."
@@ -517,9 +584,7 @@ export async function* runAgentLoop(
                   ...(entry.name === "run_command" && approved.has(entry.id) ? { confirmed: true } : {}),
                 }
               : undefined;
-          const result = toolContext
-            ? await toolRegistry.execute(entry.name, entry.input, toolContext)
-            : await toolRegistry.execute(entry.name, entry.input);
+          const result = await toolRegistry.execute(entry.name, entry.input, toolContext);
           return { ...entry, result };
         }),
       );
