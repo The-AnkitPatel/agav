@@ -31,6 +31,8 @@ export type AgentEvent =
 
 import type { DiffLine } from "../utils/diff.js";
 import { computeEditDiff, computeDiff } from "../utils/diff.js";
+import { planAndValidateEdits, type EditHunk } from "../utils/edit-engine.js";
+import { startTurnSnapshot, commitTurnSnapshot, discardTurnSnapshot } from "../utils/undo.js";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -70,6 +72,8 @@ interface LoopParams {
    */
   drainSteers?: () => string[];
   cwd?: string;
+  turnId?: string;
+  parentTurnId?: string;
 }
 
 // Tools that never need confirmation because they cannot modify the working
@@ -127,6 +131,12 @@ export async function* runAgentLoop(
   params: LoopParams,
 ): AsyncGenerator<AgentEvent> {
   const { provider, conversation, toolRegistry, model, systemPrompt, effort, maxTokens, signal, confirmTool } = params;
+  const loopCwd = params.cwd ?? process.cwd();
+  const turnSnapshot = startTurnSnapshot({
+    id: params.turnId,
+    workspaceRoot: loopCwd,
+    parentTurnId: params.parentTurnId,
+  });
   let permissionMode = params.permissionMode ?? "ask";
   let testRepairAttempts = 0;
   const MAX_REPAIR_ATTEMPTS = 3;
@@ -283,6 +293,7 @@ export async function* runAgentLoop(
             break;
 
           case "error":
+            discardTurnSnapshot(turnSnapshot.id);
             yield { type: "error", error: event.error };
             return;
         }
@@ -300,6 +311,7 @@ export async function* runAgentLoop(
           continue;
         }
       }
+      discardTurnSnapshot(turnSnapshot.id);
       yield {
         type: "error",
         error: err instanceof Error ? err : new Error(String(err)),
@@ -352,6 +364,7 @@ export async function* runAgentLoop(
       if (lateSteers.length > 0) {
         yield { type: "steer_applied", directives: lateSteers };
       }
+      commitTurnSnapshot(turnSnapshot.id);
       yield { type: "turn_complete" };
       return;
     }
@@ -436,12 +449,33 @@ export async function* runAgentLoop(
         // Compute diff preview for file-modifying tools
         let previewDiff: DiffLine[] | undefined;
         try {
-          if (call.name === "edit_file" && input.path && input.old_string && input.new_string) {
-            const content = await readFile(resolve(String(input.path)), "utf-8");
-            previewDiff = computeEditDiff(content, String(input.old_string), String(input.new_string));
+          if (call.name === "edit_file" && input.path) {
+            try {
+              const content = await readFile(resolve(loopCwd, String(input.path)), "utf-8");
+              let hunks: EditHunk[] = [];
+              if (Array.isArray(input.edits) && input.edits.length > 0) {
+                hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
+                  old_string: String(e["old_string"] ?? e["oldText"] ?? ""),
+                  new_string: String(e["new_string"] ?? e["newText"] ?? ""),
+                }));
+              } else if (input.old_string !== undefined || input.oldText !== undefined) {
+                hunks = [{
+                  old_string: String(input.old_string ?? input.oldText ?? ""),
+                  new_string: String(input.new_string ?? input.newText ?? ""),
+                }];
+              }
+              if (hunks.length > 0) {
+                const plan = planAndValidateEdits(content, hunks, String(input.path));
+                if (plan.success) {
+                  previewDiff = plan.diffLines;
+                } else if (input.old_string && input.new_string) {
+                  previewDiff = computeEditDiff(content, String(input.old_string), String(input.new_string));
+                }
+              }
+            } catch {}
           } else if (call.name === "write_file" && input.path && input.content) {
             try {
-              const oldContent = await readFile(resolve(String(input.path)), "utf-8");
+              const oldContent = await readFile(resolve(loopCwd, String(input.path)), "utf-8");
               previewDiff = computeDiff(oldContent, String(input.content));
             } catch {
               // New file — no diff preview
@@ -559,5 +593,6 @@ export async function* runAgentLoop(
   if (finalSteers.length > 0) {
     yield { type: "steer_applied", directives: finalSteers };
   }
+  commitTurnSnapshot(turnSnapshot.id);
   yield { type: "turn_complete" };
 }
