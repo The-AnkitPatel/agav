@@ -13,6 +13,11 @@ export interface ToolContext {
   env?: Record<string, string>;
   cwd?: string;
   confirmed?: boolean;
+  interactive?: boolean;
+  stdin?: string | AsyncIterable<string> | NodeJS.ReadableStream;
+  onStdoutChunk?: (chunk: string) => void;
+  onStderrChunk?: (chunk: string) => void;
+  abortSignal?: AbortSignal;
 }
 
 export interface ToolDefinition {

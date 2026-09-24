@@ -8,6 +8,7 @@ import { DeepSeekProvider } from "./deepseek.js";
 import { OllamaProvider } from "./ollama.js";
 import { GeminiProvider } from "./gemini.js";
 import { VertexAIProvider } from "./vertex-ai.js";
+import { GroqProvider } from "./groq.js";
 import { RetryProvider } from "./retry.js";
 import { KeyPoolManager } from "./key-pool.js";
 import { KeyPoolProvider } from "./key-pool-provider.js";
@@ -45,6 +46,9 @@ export function extractConfiguredKeys(config: AgavConfig, provider: string): str
       break;
     case "gemini":
       singularKeyVal = config.geminiApiKey;
+      break;
+    case "groq":
+      singularKeyVal = config.groqApiKey;
       break;
     case "ollama":
       singularKeyVal = config.ollamaApiKey;
@@ -86,6 +90,8 @@ export function createBaseProvider(provider: string, key: string, config: AgavCo
       return new NvidiaProvider(key);
     case "deepseek":
       return new DeepSeekProvider(key);
+    case "groq":
+      return new GroqProvider(key);
     case "ollama": {
       const baseURL =
         config.ollamaEndpoint ??
@@ -190,6 +196,11 @@ export function createProvider(config: AgavConfig): LLMProvider {
     case "gemini": {
       const key = required(config.geminiApiKey, "Gemini API key");
       provider = new GeminiProvider(key);
+      break;
+    }
+    case "groq": {
+      const key = required(config.groqApiKey, "Groq API key");
+      provider = new GroqProvider(key);
       break;
     }
     case "vertex-ai": {

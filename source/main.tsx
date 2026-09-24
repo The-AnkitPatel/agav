@@ -33,6 +33,7 @@ import {
   selectConfiguredProvider,
   type ProviderName,
 } from "./config/startup.js";
+import { runInteractiveKeySetup } from "./config/key-wizard.js";
 
 const KNOWN_FLAGS = [
   "--help", "-h", "--version", "-v", "--provider", "-p", "--model", "-m",
@@ -624,7 +625,7 @@ export async function main() {
     }
   }
 
-  Object.assign(config, await resolveStartupSelection(config, {
+  Object.assign(config, resolveStartupSelection(config, {
     cliProvider,
     cliModel: typeof flags.model === "string" ? flags.model : undefined,
     session: resumeSelection,
@@ -664,16 +665,36 @@ export async function main() {
       keepModel: typeof flags.model === "string",
     });
     if (!selected) {
-      process.stderr.write(`\n  Agav — ${noProviderCredentialsError()}\n\n`);
-      process.exit(1);
+      if (process.stdin.isTTY && !flags.print) {
+        const wizardConfig = await runInteractiveKeySetup(config);
+        if (wizardConfig) {
+          Object.assign(config, wizardConfig);
+        } else {
+          process.stderr.write(`\n  Agav — ${noProviderCredentialsError()}\n\n`);
+          process.exit(1);
+        }
+      } else {
+        process.stderr.write(`\n  Agav — ${noProviderCredentialsError()}\n\n`);
+        process.exit(1);
+      }
+    } else {
+      Object.assign(config, selected);
     }
-    Object.assign(config, selected);
   }
 
-  const configurationError = providerConfigurationError(config);
+  let configurationError = providerConfigurationError(config);
   if (configurationError) {
-    process.stderr.write(`\n  Agav — ${configurationError}\n\n`);
-    process.exit(1);
+    if (process.stdin.isTTY && !flags.print) {
+      const wizardConfig = await runInteractiveKeySetup(config, config.provider);
+      if (wizardConfig) {
+        Object.assign(config, wizardConfig);
+        configurationError = providerConfigurationError(config);
+      }
+    }
+    if (configurationError) {
+      process.stderr.write(`\n  Agav — ${configurationError}\n\n`);
+      process.exit(1);
+    }
   }
 
   // If Ollama is selected without a model, query the local server and choose one.
@@ -686,7 +707,7 @@ export async function main() {
         const data = await res.json() as { models?: { name: string }[] };
         models = (data.models ?? []).map((model) => model.name).filter(Boolean);
       }
-    } catch { }
+    } catch {}
     if (models.length === 0) {
       process.stderr.write("\n  Agav — no Ollama models found. Specify --model or run `ollama pull <model>`.\n\n");
       process.exit(1);
@@ -762,10 +783,10 @@ export async function main() {
   if (!process.stdin.isTTY) {
     process.stderr.write(
       "\n  Agav's interactive UI needs a terminal, but stdin is not a TTY.\n\n" +
-      "    • Run `agav` directly from your shell.\n" +
-      "    • For piped or scripted use:  agav -P \"your prompt\"\n" +
-      "    • Just installed through a pipe? That pipe is still attached —\n" +
-      "      open your terminal and run `agav`.\n\n",
+        "    • Run `agav` directly from your shell.\n" +
+        "    • For piped or scripted use:  agav -P \"your prompt\"\n" +
+        "    • Just installed through a pipe? That pipe is still attached —\n" +
+        "      open your terminal and run `agav`.\n\n",
     );
     process.exit(1);
   }
@@ -780,7 +801,7 @@ export async function main() {
         const shortId = latest.id;
         process.stderr.write(`\n${dim(`To resume: agav --resume ${shortId}`)}\n\n`);
       }
-    } catch { }
+    } catch {}
   }
 
   // Mark clean exits so crash recovery only offers truly interrupted sessions.
